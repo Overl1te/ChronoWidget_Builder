@@ -11,7 +11,6 @@ from PySide6.QtGui import QBrush, QPen, QColor, QFont, QLinearGradient, QPixmap,
 
 from config import WIDGET_TEMPLATES
 
-# --- СИГНАЛЬНЫЙ МИКСИН ---
 class HandleItem(QGraphicsRectItem):
     def __init__(self, parent):
         super().__init__(-6, -6, 12, 12, parent)
@@ -44,6 +43,7 @@ class BaseResizableItem(QGraphicsObject):
         self.resize_handle.hide()
         self.uid = str(uuid.uuid4())
         self.data_model = {"id": self.uid}
+        self.is_locked = False 
 
     def rect(self): return self.rect_geom
     def setRect(self, x, y, w, h):
@@ -53,18 +53,29 @@ class BaseResizableItem(QGraphicsObject):
     def boundingRect(self): return self.rect_geom.adjusted(-2, -2, 2, 2)
     def update_handle_pos(self): self.resize_handle.setPos(self.rect().width(), self.rect().height())
     
+    # --- Interaction Logic ---
+    def update_flags(self):
+        if self.is_locked:
+            self.setFlag(QGraphicsItem.ItemIsMovable, False)
+            self.setFlag(QGraphicsItem.ItemIsSelectable, False) # Блокировка полностью игнорит клики
+            self.resize_handle.hide()
+        else:
+            self.setFlag(QGraphicsItem.ItemIsMovable, True)
+            self.setFlag(QGraphicsItem.ItemIsSelectable, True)
+            if self.isSelected(): self.resize_handle.show()
+
     def mousePressEvent(self, event):
-        self.notify_interaction_start()
+        if not self.is_locked: self.notify_interaction_start()
         super().mousePressEvent(event)
     def mouseReleaseEvent(self, event):
         super().mouseReleaseEvent(event)
-        self.notify_interaction_end()
+        if not self.is_locked: self.notify_interaction_end()
     def notify_interaction_start(self): self.interaction_started.emit(self)
     def notify_interaction_end(self): self.interaction_finished.emit(self)
 
     def itemChange(self, change, value):
         if change == QGraphicsItem.ItemSelectedChange:
-            if value: self.resize_handle.show()
+            if value and not self.is_locked: self.resize_handle.show()
             else: self.resize_handle.hide()
         if change == QGraphicsItem.ItemPositionChange and self.scene():
             return self.constrain_position(value)
@@ -112,15 +123,19 @@ class BaseResizableItem(QGraphicsObject):
 
     def clone_state(self): return copy.deepcopy(self.data_model)
 
-    def draw_styled_rect(self, painter, rect, style):
+    # --- РИСОВАНИЕ ---
+    def draw_styled_shape(self, painter, rect, style, is_circle=False):
         painter.save()
-        radius = int(style.get('radius', 0))
-        path = QPainterPath()
-        path.addRoundedRect(rect, radius, radius)
-        painter.setClipPath(path)
         
-        opacity = float(style.get('opacity', 1.0))
-        painter.setOpacity(opacity)
+        path = QPainterPath()
+        if is_circle:
+            path.addEllipse(rect)
+        else:
+            radius = int(style.get('radius', 0))
+            path.addRoundedRect(rect, radius, radius)
+            
+        painter.setClipPath(path)
+        painter.setOpacity(float(style.get('opacity', 1.0)))
         
         bg_col_str = style.get('bg_color', '#ffffff')
         if bg_col_str == 'transparent': painter.setBrush(Qt.NoBrush)
@@ -174,7 +189,7 @@ class RootFrameItem(BaseResizableItem):
         self.uid = "root"
         self.setZValue(0)
     def paint(self, painter, option, widget):
-        self.draw_styled_rect(painter, self.rect(), self.data_model.get('style', {}))
+        self.draw_styled_shape(painter, self.rect(), self.data_model.get('style', {}))
     def constrain_position(self, pos):
         x, y = pos.x(), pos.y()
         w, h = self.rect().width(), self.rect().height()
@@ -186,8 +201,10 @@ class RootFrameItem(BaseResizableItem):
         return QPointF(x, y)
     def handle_resize(self, scene_pos): 
         local_pos = self.mapFromScene(scene_pos)
-        new_w = max(50, local_pos.x()); new_h = max(50, local_pos.y())
-        screen_w = self.screen_rect.width(); screen_h = self.screen_rect.height()
+        new_w = max(50, local_pos.x())
+        new_h = max(50, local_pos.y())
+        screen_w = self.screen_rect.width()
+        screen_h = self.screen_rect.height()
         if self.x() + new_w > screen_w: new_w = screen_w - self.x()
         if self.y() + new_h > screen_h: new_h = screen_h - self.y()
         self.setRect(0, 0, new_w, new_h)
@@ -243,21 +260,18 @@ class WidgetItem(BaseResizableItem):
 
     def paint(self, painter, option, widget):
         type_ = self.data_model.get('type', 'rect')
+        style = self.data_model.get('style', {})
         
-        # 1. Если это Progress Bar
-        if type_ == 'progress':
-            style = self.data_model.get('style', {})
+        if type_ == 'circle':
+            self.draw_styled_shape(painter, self.rect(), style, is_circle=True)
+            
+        elif type_ == 'progress':
+            self.draw_styled_shape(painter, self.rect(), style)
             content = self.data_model.get('content', {})
-            
-            # Рисуем фон (трек)
-            self.draw_styled_rect(painter, self.rect(), style)
-            
-            # Рисуем заполнение
             val = float(content.get('value', 0))
             max_val = float(content.get('max_value', 100))
             if max_val == 0: max_val = 1
             ratio = min(max(val / max_val, 0), 1)
-            
             fill_w = self.rect().width() * ratio
             fill_rect = QRectF(0, 0, fill_w, self.rect().height())
             
@@ -267,31 +281,21 @@ class WidgetItem(BaseResizableItem):
             path.addRoundedRect(fill_rect, radius, radius)
             painter.setClipPath(path)
             
-            # Цвет бара
             if content.get('use_gradient', False):
                 start_c = QColor(content.get('grad_start', '#00ff00'))
                 end_c = QColor(content.get('grad_end', '#007700'))
-                angle = int(content.get('grad_angle', 90))
-                # (Логика градиента упрощена для бара, можно скопировать из draw_styled_rect)
                 gradient = QLinearGradient(0, 0, fill_w, 0)
                 gradient.setColorAt(0, start_c); gradient.setColorAt(1, end_c)
                 painter.fillPath(path, QBrush(gradient))
             else:
                 c = QColor(content.get('bar_color', '#00ff00'))
                 painter.fillPath(path, QColor(c))
-            
             painter.restore()
-            
-            # Рамка выделения поверх всего
             if self.isSelected():
-                painter.setPen(QPen(Qt.blue, 2, Qt.DashLine))
-                painter.setBrush(Qt.NoBrush)
-                painter.drawRect(self.rect())
+                painter.setPen(QPen(Qt.blue, 2, Qt.DashLine)); painter.setBrush(Qt.NoBrush); painter.drawRect(self.rect())
                 
-        # 2. Обычные элементы (rect, circle, image) + text/clock/date
-        else:
-            # Рисуем фон (rect)
-            self.draw_styled_rect(painter, self.rect(), self.data_model.get('style', {}))
+        else: # Rect, Image, Text containers
+            self.draw_styled_shape(painter, self.rect(), style)
     
     def refresh_content(self):
         content = self.data_model.get('content', {})
@@ -305,11 +309,12 @@ class WidgetItem(BaseResizableItem):
         elif type_ == 'date':
             fmt = content.get('format', '%d.%m.%Y')
             try: text = datetime.now().strftime(fmt)
-            except: text = "Format Error"
+            except: text = "Error"
         elif type_ == 'text': 
             text = content.get('text', 'Text')
+            # Data Binding Stub
+            text = text.replace("{cpu}", "15%").replace("{ram}", "4GB").replace("{bat}", "80%")
         
-        # Обновляем текст
         if text:
             font = QFont(content.get('font_family', 'Arial'), int(content.get('font_size', 12)))
             self.content_proxy.setFont(font)

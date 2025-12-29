@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QGridLayout, QLineEdit, QSp
                                QAbstractItemView, QFileDialog, QCheckBox, QDoubleSpinBox,
                                QHBoxLayout, QDialog, QFormLayout, QFrame, QComboBox, QFontComboBox)
 from PySide6.QtCore import Qt, Signal, QEvent, QStandardPaths, QSettings
-from PySide6.QtGui import QAction, QColor
+from PySide6.QtGui import QAction, QPainter, QMouseEvent, QColor
 
 from items import RootFrameItem, WidgetItem, BaseResizableItem, BgImageGizmo
 from config import APP_VERSION, APP_NAME
@@ -14,15 +14,14 @@ class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Настройки")
-        self.setFixedSize(450, 400)
+        self.setFixedSize(450, 450)
         self.settings = QSettings("Overl1te", "ChronoBuilder")
         layout = QVBoxLayout(self)
         
         group_path = QGroupBox("Пути")
         form_path = QFormLayout(group_path)
         self.path_edit = QLineEdit(self.settings.value("default_dir", QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation)))
-        btn_path = QPushButton("...")
-        btn_path.clicked.connect(self.browse_path)
+        btn_path = QPushButton("..."); btn_path.clicked.connect(self.browse_path)
         h = QHBoxLayout(); h.addWidget(self.path_edit); h.addWidget(btn_path)
         form_path.addRow("Папка проектов:", h)
         layout.addWidget(group_path)
@@ -50,6 +49,11 @@ class SettingsDialog(QDialog):
         layout.addWidget(group_theme)
         
         layout.addStretch()
+        
+        line = QFrame(); line.setFrameShape(QFrame.HLine); line.setFrameShadow(QFrame.Sunken); layout.addWidget(line)
+        lbl_ver = QLabel(f"{APP_NAME} {APP_VERSION}")
+        lbl_ver.setAlignment(Qt.AlignCenter); lbl_ver.setStyleSheet("color: #888; font-size: 11px;"); layout.addWidget(lbl_ver)
+
         btns = QHBoxLayout()
         btn_save = QPushButton("Сохранить"); btn_save.clicked.connect(self.save_settings)
         btn_close = QPushButton("Отмена"); btn_close.clicked.connect(self.reject)
@@ -67,11 +71,15 @@ class SettingsDialog(QDialog):
         self.settings.setValue("theme", self.combo_theme.currentText())
         self.accept()
 
+# --- TREE ---
 class HierarchyTree(QTreeWidget):
     item_clicked_in_tree = Signal(object); hierarchy_reordered = Signal()
     def __init__(self):
-        super().__init__(); self.setHeaderLabel("Иерархия"); self.setColumnCount(1)
-        self.itemClicked.connect(self.on_click); self.setDragEnabled(True); self.setAcceptDrops(True)
+        super().__init__()
+        self.setHeaderLabels(["Имя", "🔒", "👁"])
+        self.setColumnWidth(0, 140); self.setColumnWidth(1, 30); self.setColumnWidth(2, 30)
+        self.itemClicked.connect(self.on_click)
+        self.setDragEnabled(True); self.setAcceptDrops(True)
         self.setDropIndicatorShown(True); self.setDragDropMode(QAbstractItemView.InternalMove)
     def dropEvent(self, event): super().dropEvent(event); self.sync_scene_from_tree(); self.hierarchy_reordered.emit()
     def sync_scene_from_tree(self): self.recursive_sync(self.invisibleRootItem(), None)
@@ -85,25 +93,38 @@ class HierarchyTree(QTreeWidget):
     def refresh(self, root_frame):
         if self.state() == QAbstractItemView.DraggingState: return
         self.clear(); self.blockSignals(True)
-        root = QTreeWidgetItem(["Root Frame"]); root.setData(0, Qt.UserRole, root_frame)
+        root = QTreeWidgetItem(["Root Frame", "", ""]); root.setData(0, Qt.UserRole, root_frame)
         self.addTopLevelItem(root); root.setExpanded(True); self.add_children_recursive(root_frame, root)
         self.blockSignals(False)
     def add_children_recursive(self, parent_item, parent_node):
         children = list(parent_item.childItems()); children.sort(key=lambda x: x.zValue(), reverse=True)
         for child in children:
             if isinstance(child, WidgetItem):
-                node = QTreeWidgetItem([child.data_model.get('name', 'Widget')])
-                node.setData(0, Qt.UserRole, child); parent_node.addChild(node); node.setExpanded(True)
+                lock = "🔒" if child.is_locked else "🔓"
+                vis = "👁" if child.isVisible() else "🚫"
+                node = QTreeWidgetItem([child.data_model.get('name', 'Widget'), lock, vis])
+                node.setData(0, Qt.UserRole, child); 
+                node.setTextAlignment(1, Qt.AlignCenter); node.setTextAlignment(2, Qt.AlignCenter)
+                parent_node.addChild(node); node.setExpanded(True)
                 if getattr(child, 'is_container', False): self.add_children_recursive(child, node)
     def on_click(self, item, col):
         gfx = item.data(0, Qt.UserRole)
-        if gfx: self.item_clicked_in_tree.emit(gfx)
+        if not gfx: return
+        if col == 1: # Lock
+            if isinstance(gfx, RootFrameItem): return
+            gfx.is_locked = not getattr(gfx, 'is_locked', False)
+            item.setText(1, "🔒" if gfx.is_locked else "🔓")
+            gfx.update_flags()
+        elif col == 2: # Hide
+            vis = not gfx.isVisible(); gfx.setVisible(vis)
+            item.setText(2, "👁" if vis else "🚫")
+        else: self.item_clicked_in_tree.emit(gfx)
 
+# --- PROPERTIES ---
 class PropertiesPanel(QWidget):
-    # Сигналы:
-    data_changed = Signal(object)          # Живое изменение (для перерисовки сцены)
-    property_committed = Signal(str, object, object) # Фиксация изменения (для Undo стека)
-    undo_refresh_requested = Signal(object) # Запрос на обновление UI после Undo
+    data_changed = Signal(object)
+    property_committed = Signal(str, object, object)
+    undo_refresh_requested = Signal(object)
     request_bg_edit = Signal(object)
 
     def __init__(self):
@@ -183,19 +204,19 @@ class PropertiesPanel(QWidget):
                 btn_edit = QPushButton("⛶"); btn_edit.setToolTip("Позиция"); btn_edit.setMaximumWidth(30); btn_edit.clicked.connect(lambda: self.request_bg_edit.emit(self.current_item))
                 btn_reset = QPushButton("↺"); btn_reset.setToolTip("Сброс"); btn_reset.setMaximumWidth(30); btn_reset.clicked.connect(self.reset_bg_geo)
                 hl.addWidget(le); hl.addWidget(btn_file); hl.addWidget(btn_edit); hl.addWidget(btn_reset)
-            elif "angle" in k:
-                widget = QSpinBox(); widget.setRange(0, 360); widget.setSuffix("°"); widget.setValue(int(v))
+            elif "angle" in k or k in ["value", "max_value"]:
+                widget = QSpinBox(); widget.setRange(0, 9999); 
+                if "angle" in k: widget.setSuffix("°"); widget.setRange(0, 360)
+                widget.setValue(int(v))
                 widget.valueChanged.connect(lambda val, p=path, old=v: self.commit_prop(p, old, val))
             elif "color" in k or "start" in k or "end" in k:
                 if isinstance(v, str) and v.startswith("#"):
                     widget = QPushButton(str(v)); widget.setStyleSheet(f"background: {v}; color: #555; border: 1px solid #999;")
                     widget.clicked.connect(lambda _, b=widget, p=path, old=v: self.pick_color(b, p, old))
             elif isinstance(v, bool):
-                widget = QCheckBox(); widget.setChecked(v)
-                widget.stateChanged.connect(lambda val, p=path, old=v: self.commit_prop(p, old, bool(val)))
+                widget = QCheckBox(); widget.setChecked(v); widget.stateChanged.connect(lambda val, p=path, old=v: self.commit_prop(p, old, bool(val)))
             elif isinstance(v, float):
-                widget = QDoubleSpinBox(); widget.setRange(0.0, 1.0); widget.setSingleStep(0.1); widget.setValue(v)
-                widget.valueChanged.connect(lambda val, p=path, old=v: self.commit_prop(p, old, val))
+                widget = QDoubleSpinBox(); widget.setRange(0.0, 1.0); widget.setSingleStep(0.1); widget.setValue(v); widget.valueChanged.connect(lambda val, p=path, old=v: self.commit_prop(p, old, val))
             elif isinstance(v, int): widget = self.make_spin(v, path)
             elif isinstance(v, str): 
                 widget = QLineEdit(str(v))
@@ -209,7 +230,6 @@ class PropertiesPanel(QWidget):
                 row += 1
         
         group.setLayout(form); self.layout.addWidget(group)
-        
         is_grad = data_dict.get("use_gradient", False)
         for k in grad_keys:
             fk = f"{prefix}.{k}"
@@ -222,32 +242,25 @@ class PropertiesPanel(QWidget):
     def make_spin(self, val, path):
         sb = QSpinBox(); sb.setRange(-9999, 9999); sb.setValue(int(val))
         sb.valueChanged.connect(lambda v, p=path: self.update_data(p, v))
-        # Для спинбоксов commit происходит по valueChanged для Undo, но с проверкой изменений
-        # Это упрощение, идеально - editingFinished, но неудобно для слайдеров/драггинга
         return sb
-
     def commit_prop(self, path, old_val, new_val):
         if old_val == new_val: return
         self.property_committed.emit(path, old_val, new_val)
-
     def pick_color(self, btn, path, old_val):
         c = QColorDialog.getColor(initial=QColor(old_val))
         if c.isValid(): 
             new_val = c.name()
             btn.setText(new_val); btn.setStyleSheet(f"background: {new_val}; color: #555; border: 1px solid #999;"); 
             self.commit_prop(path, old_val, new_val)
-            self.update_data(path, new_val) # И сразу обновить вид
-
+            self.update_data(path, new_val)
     def pick_file(self, line_edit):
         docs = QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation)
         path, _ = QFileDialog.getOpenFileName(self, "Выбрать", docs, "Img (*.png *.jpg *.jpeg *.svg)")
         if path: line_edit.setText(path); line_edit.editingFinished.emit()
-
     def reset_bg_geo(self):
         if not self.current_item: return
         self.update_data("style.bg_x", 0); self.update_data("style.bg_y", 0)
         self.update_data("style.bg_w", 0); self.update_data("style.bg_h", 0)
-
     def update_data(self, path, value):
         if not self.current_item: return
         keys = path.split('.'); ref = self.current_item.data_model
@@ -262,7 +275,6 @@ class PropertiesPanel(QWidget):
         if hasattr(self.current_item, 'refresh_content'): self.current_item.refresh_content()
         self.current_item.update()
         self.data_changed.emit(self.current_item)
-
     def add_action_buttons(self, item):
         self.layout.addSpacing(10)
         if isinstance(item, RootFrameItem):
@@ -276,16 +288,68 @@ class PropertiesPanel(QWidget):
             self.layout.addWidget(btn)
     def delete_widget(self):
         if self.current_item and not isinstance(self.current_item, RootFrameItem):
-            scene = self.current_item.scene()
-            scene.removeItem(self.current_item)
-            self.set_item(None)
+            scene = self.current_item.scene(); scene.removeItem(self.current_item); self.set_item(None)
 
+# --- VIEW ---
 class EditorView(QGraphicsView):
     item_selected = Signal(object); item_deleted = Signal(); hierarchy_changed = Signal(); request_properties = Signal()
     def __init__(self, scene, root_frame):
         super().__init__(scene); self.root_frame = root_frame
         self.setAcceptDrops(True); self.scene().selectionChanged.connect(self.on_selection); self.bg_gizmo = None
-    
+        self.setRenderHint(QPainter.Antialiasing); self.setRenderHint(QPainter.SmoothPixmapTransform)
+        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse); self.setResizeAnchor(QGraphicsView.AnchorUnderMouse)
+        # Default mode is selection (RubberBand)
+        self.setDragMode(QGraphicsView.RubberBandDrag)
+
+    def wheelEvent(self, event):
+        if event.modifiers() & Qt.ControlModifier:
+            zoom_in = event.angleDelta().y() > 0
+            scale_factor = 1.1 if zoom_in else 0.9
+            self.scale(scale_factor, scale_factor)
+            event.accept()
+        else: super().wheelEvent(event)
+
+    def keyPressEvent(self, event):
+        # Если пробел зажат - включаем руку
+        if event.key() == Qt.Key_Space and not event.isAutoRepeat():
+            self.setDragMode(QGraphicsView.ScrollHandDrag)
+        elif event.key() == Qt.Key_Delete:
+            items = self.scene().selectedItems(); changed = False
+            for i in items:
+                if isinstance(i, BgImageGizmo): continue
+                if isinstance(i, WidgetItem): 
+                    if i.is_locked: continue
+                    self.scene().removeItem(i); changed = True
+            if changed: self.item_selected.emit(None); self.item_deleted.emit(); self.hierarchy_changed.emit()
+        else: super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        # Если пробел отпущен - возвращаем выделение
+        if event.key() == Qt.Key_Space and not event.isAutoRepeat():
+            self.setDragMode(QGraphicsView.RubberBandDrag)
+        super().keyReleaseEvent(event)
+
+    def mousePressEvent(self, event):
+        # Если нажата СКМ - включаем руку и эмулируем левый клик (т.к. ScrollHand работает по ЛКМ)
+        if event.button() == Qt.MiddleButton:
+            self.setDragMode(QGraphicsView.ScrollHandDrag)
+            fake_event = QMouseEvent(QEvent.MouseButtonPress, event.position(), event.globalPosition(), 
+                                     Qt.LeftButton, Qt.LeftButton, event.modifiers())
+            super().mousePressEvent(fake_event)
+        else:
+            # Для левой кнопки поведение зависит от текущего режима (Selection или Hand)
+            super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MiddleButton:
+            # Отпустили СКМ - возвращаем выделение
+            fake_event = QMouseEvent(QEvent.MouseButtonRelease, event.position(), event.globalPosition(), 
+                                     Qt.LeftButton, Qt.LeftButton, event.modifiers())
+            super().mouseReleaseEvent(fake_event)
+            self.setDragMode(QGraphicsView.RubberBandDrag)
+        else:
+            super().mouseReleaseEvent(event)
+
     def dragEnterEvent(self, event): (event.accept() if event.mimeData().hasText() else event.ignore())
     def dragMoveEvent(self, event): event.accept()
     def dropEvent(self, event):
@@ -294,6 +358,7 @@ class EditorView(QGraphicsView):
         self.scene().clearSelection()
         items = self.scene().items(scene_pos)
         parent = next((i for i in items if isinstance(i, RootFrameItem) or (isinstance(i, WidgetItem) and getattr(i, 'is_container', False))), self.root_frame)
+        if isinstance(parent, WidgetItem) and parent.is_locked: parent = self.root_frame
         local_pos = parent.mapFromScene(scene_pos)
         if parent.contains(local_pos):
             item = WidgetItem(key, local_pos.x(), local_pos.y(), parent)
@@ -309,15 +374,6 @@ class EditorView(QGraphicsView):
         real = [i for i in sel if isinstance(i, BaseResizableItem)]
         self.item_selected.emit(real[0] if real else None)
 
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Delete:
-            items = self.scene().selectedItems(); changed = False
-            for i in items:
-                if isinstance(i, BgImageGizmo): continue
-                if isinstance(i, WidgetItem): self.scene().removeItem(i); changed = True
-            if changed: self.item_selected.emit(None); self.item_deleted.emit(); self.hierarchy_changed.emit()
-        else: super().keyPressEvent(event)
-
     def contextMenuEvent(self, event):
         item = self.scene().itemAt(self.mapToScene(event.pos()), self.transform())
         target = item
@@ -327,7 +383,8 @@ class EditorView(QGraphicsView):
         menu.addAction("Свойства", lambda: self.open_properties(target))
         menu.addSeparator()
         if isinstance(target, RootFrameItem): menu.addAction("Сброс", target.reset_settings)
-        elif isinstance(target, WidgetItem): menu.addAction("Удалить", lambda: self.delete_item_safe(target))
+        elif isinstance(target, WidgetItem): 
+            if not target.is_locked: menu.addAction("Удалить", lambda: self.delete_item_safe(target))
         menu.exec(event.globalPos())
 
     def open_properties(self, item):
@@ -344,7 +401,4 @@ class EditorView(QGraphicsView):
         self.scene().clearSelection()
         self.bg_gizmo.setSelected(True)
     def remove_gizmo(self):
-        if self.bg_gizmo:
-            self.bg_gizmo.target.update()
-            self.scene().removeItem(self.bg_gizmo)
-            self.bg_gizmo = None
+        if self.bg_gizmo: self.bg_gizmo.target.update(); self.scene().removeItem(self.bg_gizmo); self.bg_gizmo = None
