@@ -15,7 +15,7 @@ from PySide6.QtCore import Qt, QMimeData, QRectF, QStandardPaths, QUrl, QTimer, 
 from PySide6.QtGui import QDrag, QBrush, QColor, QPen, QAction, QDesktopServices, QIcon, QKeySequence, QUndoStack, QUndoCommand
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
 
-from config import SCREEN_WIDTH, SCREEN_HEIGHT, WIDGET_TEMPLATES, APP_NAME, APP_VERSION, GITHUB_REPO_URL, get_setting
+from config import SCREEN_WIDTH, SCREEN_HEIGHT, WIDGET_TEMPLATES, APP_NAME, APP_VERSION, GITHUB_REPO_URL, get_setting, THEMES
 from items import RootFrameItem, WidgetItem
 from ui import EditorView, PropertiesPanel, HierarchyTree, SettingsDialog
 
@@ -116,13 +116,11 @@ class ProjectManager:
         if 'root' in data: root_frame.apply_data(data['root'])
         widgets_map = {}
         widgets_data = data.get('widgets', [])
-        # 1. Create items
         for w_data in widgets_data:
             w_type = w_data.get('type', 'rect')
             item = WidgetItem(w_type, w_data['x'], w_data['y'], root_frame)
             item.apply_data(w_data)
             widgets_map[w_data['id']] = item
-        # 2. Link hierarchy
         for w_data in widgets_data:
             item = widgets_map.get(w_data['id'])
             if not item: continue
@@ -167,20 +165,24 @@ class ProjectManager:
                     if getattr(child, 'is_container', False): collect(child, w_data.get('id', str(id(child))))
         collect(root_frame, "root")
         json_str = json.dumps(data, indent=4, ensure_ascii=False)
-        html = """<!DOCTYPE html><html><body><h1>WGT Export</h1><p>Widget Structure Ready.</p></body></html>"""
+        html = """<!DOCTYPE html><html><body><h1>WGT Export</h1></body></html>"""
         with zipfile.ZipFile(filepath, 'w') as zf:
             zf.writestr('widget.json', json_str)
             zf.writestr('index.html', html)
 
-# --- MAIN APP ---
+# --- MAIN ---
 class GridScene(QGraphicsScene):
     def __init__(self, w, h): super().__init__(0, 0, w, h); self.grid_size = 50
     def drawBackground(self, painter, rect):
-        if not get_setting("show_grid", True, type=bool): painter.fillRect(rect, QColor("#FAFAFA")); return
-        painter.fillRect(rect, QColor("#FAFAFA")); self.grid_color = QColor(230, 230, 230)
+        is_dark = get_setting("theme", "Light", type=str) == "Dark"
+        bg = QColor("#1e1e1e") if is_dark else QColor("#FAFAFA")
+        grid_col = QColor("#2d2d2d") if is_dark else QColor("#e0e0e0")
+        painter.fillRect(rect, bg)
+        if not get_setting("show_grid", True, type=bool): return
         left = int(rect.left()) - (int(rect.left()) % self.grid_size); top = int(rect.top()) - (int(rect.top()) % self.grid_size)
-        for x in range(left, int(rect.right()), self.grid_size): painter.setPen(QPen(self.grid_color, 1)); painter.drawLine(x, int(rect.top()), x, int(rect.bottom()))
-        for y in range(top, int(rect.bottom()), self.grid_size): painter.setPen(QPen(self.grid_color, 1)); painter.drawLine(int(rect.left()), y, int(rect.right()), y)
+        painter.setPen(QPen(grid_col, 1))
+        for x in range(left, int(rect.right()), self.grid_size): painter.drawLine(x, int(rect.top()), x, int(rect.bottom()))
+        for y in range(top, int(rect.bottom()), self.grid_size): painter.drawLine(int(rect.left()), y, int(rect.right()), y)
 
 class App(QMainWindow):
     def __init__(self):
@@ -189,7 +191,6 @@ class App(QMainWindow):
         self.resize(1400, 900)
         self.network_manager = QNetworkAccessManager(self); self.clipboard_data = None 
         self.undo_stack = QUndoStack(self); self.temp_move_state = {} 
-        self.apply_theme(get_setting("theme", "Light", type=str))
 
         self.scene = GridScene(2500, 1500)
         self.screen_rect = QRectF(100, 100, SCREEN_WIDTH, SCREEN_HEIGHT)
@@ -204,18 +205,22 @@ class App(QMainWindow):
         self.statusBar().showMessage("Готов")
         self.tree_widget.refresh(self.root_frame)
 
-        # Связи
         self.view.item_selected.connect(self.props.set_item)
         self.props.data_changed.connect(lambda item: self.scene.update())
+        
         self.view.hierarchy_changed.connect(lambda: self.tree_widget.refresh(self.root_frame))
         self.tree_widget.item_clicked_in_tree.connect(self.select_from_tree)
         self.tree_widget.hierarchy_reordered.connect(lambda: self.scene.update())
         self.view.request_properties.connect(self.show_properties_dock)
         self.props.request_bg_edit.connect(self.view.start_bg_edit)
+        
         self.props.property_committed.connect(self.on_property_committed)
         self.props.undo_refresh_requested.connect(self.on_undo_refresh)
         
         self.connect_items_signals()
+        
+        # Apply theme last
+        self.apply_theme(get_setting("theme", "Light", type=str))
         QTimer.singleShot(2000, self.check_updates)
 
     def connect_items_signals(self):
@@ -361,17 +366,8 @@ class App(QMainWindow):
         else: self.view.setDragMode(QGraphicsView.NoDrag)
 
     def apply_theme(self, theme_name):
-        if theme_name == "Dark":
-            self.setStyleSheet("""
-                QMainWindow, QWidget { background-color: #2b2b2b; color: #e0e0e0; }
-                QListWidget, QTreeWidget { background-color: #3c3f41; border: 1px solid #555; }
-                QGroupBox { border: 1px solid #555; margin-top: 10px; }
-                QLineEdit, QSpinBox, QComboBox, QFontComboBox { background-color: #3c3f41; border: 1px solid #555; padding: 4px; }
-                QPushButton { background-color: #3c3f41; border: 1px solid #555; padding: 5px; }
-                QMenu { background-color: #3c3f41; border: 1px solid #555; }
-                QMenuBar { background-color: #2b2b2b; }
-            """)
-        else: self.setStyleSheet("")
+        self.setStyleSheet(THEMES.get(theme_name, ""))
+        self.scene.update()
 
     def start_drag(self, list_widget):
         item = list_widget.currentItem()
@@ -406,7 +402,7 @@ class App(QMainWindow):
         if path: ProjectManager.export_product_wgt(path, self.root_frame)
     def open_settings(self):
         dlg = SettingsDialog(self)
-        if dlg.exec_(): self.scene.update(); self.apply_theme(get_setting("theme", "Light", type=str))
+        if dlg.exec_(): self.apply_theme(get_setting("theme", "Light", type=str))
     def check_updates(self): pass 
     def copy_item(self):
         items = [i for i in self.scene.selectedItems() if isinstance(i, WidgetItem)]

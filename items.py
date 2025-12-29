@@ -11,14 +11,21 @@ from PySide6.QtGui import QBrush, QPen, QColor, QFont, QLinearGradient, QPixmap,
 
 from config import WIDGET_TEMPLATES
 
+# --- УЛУЧШЕННАЯ РУЧКА ---
 class HandleItem(QGraphicsRectItem):
     def __init__(self, parent):
         super().__init__(-6, -6, 12, 12, parent)
         self.setCursor(Qt.SizeFDiagCursor)
-        self.setBrush(QBrush(QColor("#3498db")))
-        self.setPen(QPen(Qt.white, 1))
+        self.setBrush(QBrush(QColor("#ffffff")))
+        self.setPen(QPen(QColor("#007fd4"), 2))
         self.setFlags(QGraphicsItem.ItemIsMovable)
         self.setZValue(999)
+        
+    def paint(self, painter, option, widget):
+        painter.setBrush(self.brush())
+        painter.setPen(self.pen())
+        painter.drawEllipse(self.rect())
+
     def mousePressEvent(self, event):
         self.parentItem().notify_interaction_start()
         super().mousePressEvent(event)
@@ -50,14 +57,15 @@ class BaseResizableItem(QGraphicsObject):
         self.rect_geom = QRectF(x, y, w, h)
         self.prepareGeometryChange()
         self.update()
-    def boundingRect(self): return self.rect_geom.adjusted(-2, -2, 2, 2)
-    def update_handle_pos(self): self.resize_handle.setPos(self.rect().width(), self.rect().height())
+    def boundingRect(self): 
+        return self.rect_geom.adjusted(-8, -8, 8, 8)
+    def update_handle_pos(self): 
+        self.resize_handle.setPos(self.rect().width(), self.rect().height())
     
-    # --- Interaction Logic ---
     def update_flags(self):
         if self.is_locked:
             self.setFlag(QGraphicsItem.ItemIsMovable, False)
-            self.setFlag(QGraphicsItem.ItemIsSelectable, False) # Блокировка полностью игнорит клики
+            self.setFlag(QGraphicsItem.ItemIsSelectable, False) 
             self.resize_handle.hide()
         else:
             self.setFlag(QGraphicsItem.ItemIsMovable, True)
@@ -123,10 +131,8 @@ class BaseResizableItem(QGraphicsObject):
 
     def clone_state(self): return copy.deepcopy(self.data_model)
 
-    # --- РИСОВАНИЕ ---
     def draw_styled_shape(self, painter, rect, style, is_circle=False):
         painter.save()
-        
         path = QPainterPath()
         if is_circle:
             path.addEllipse(rect)
@@ -170,11 +176,15 @@ class BaseResizableItem(QGraphicsObject):
 
         painter.restore() 
         b_width = int(style.get('border_width', 0))
-        if b_width > 0 or self.isSelected():
+        if b_width > 0:
             b_color = QColor(style.get('border_color', '#000000'))
             pen = QPen(b_color, b_width)
-            if self.isSelected(): pen.setStyle(Qt.DashLine); pen.setColor(Qt.blue); pen.setWidth(2)
             painter.setPen(pen); painter.setBrush(Qt.NoBrush); painter.drawPath(path)
+            
+        if self.isSelected():
+            pen = QPen(QColor("#007fd4"), 1, Qt.DashLine)
+            painter.setPen(pen); painter.setBrush(Qt.NoBrush)
+            painter.drawRect(self.boundingRect().adjusted(1,1,-1,-1))
 
 class RootFrameItem(BaseResizableItem):
     def __init__(self, screen_rect):
@@ -201,10 +211,8 @@ class RootFrameItem(BaseResizableItem):
         return QPointF(x, y)
     def handle_resize(self, scene_pos): 
         local_pos = self.mapFromScene(scene_pos)
-        new_w = max(50, local_pos.x())
-        new_h = max(50, local_pos.y())
-        screen_w = self.screen_rect.width()
-        screen_h = self.screen_rect.height()
+        new_w = max(50, local_pos.x()); new_h = max(50, local_pos.y())
+        screen_w = self.screen_rect.width(); screen_h = self.screen_rect.height()
         if self.x() + new_w > screen_w: new_w = screen_w - self.x()
         if self.y() + new_h > screen_h: new_h = screen_h - self.y()
         self.setRect(0, 0, new_w, new_h)
@@ -292,7 +300,7 @@ class WidgetItem(BaseResizableItem):
                 painter.fillPath(path, QColor(c))
             painter.restore()
             if self.isSelected():
-                painter.setPen(QPen(Qt.blue, 2, Qt.DashLine)); painter.setBrush(Qt.NoBrush); painter.drawRect(self.rect())
+                painter.setPen(QPen(QColor("#007fd4"), 2, Qt.DashLine)); painter.setBrush(Qt.NoBrush); painter.drawRect(self.rect())
                 
         else: # Rect, Image, Text containers
             self.draw_styled_shape(painter, self.rect(), style)
@@ -312,7 +320,6 @@ class WidgetItem(BaseResizableItem):
             except: text = "Error"
         elif type_ == 'text': 
             text = content.get('text', 'Text')
-            # Data Binding Stub
             text = text.replace("{cpu}", "15%").replace("{ram}", "4GB").replace("{bat}", "80%")
         
         if text:
